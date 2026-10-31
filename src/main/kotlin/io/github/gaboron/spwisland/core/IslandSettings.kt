@@ -35,6 +35,8 @@ data class IslandSettings(
     val lyricCoverColor: Boolean = false,
     val backgroundCoverColor: Boolean = false,
     val backgroundStyle: IslandBackgroundStyle = IslandBackgroundStyle.CLASSIC,
+    /** Map HDR desktops back to SDR-encoded glass instead of overclipping an 8-bit crop. */
+    val hdrToneMapping: Boolean = true,
     val backgroundProgress: BackgroundProgressMode = BackgroundProgressMode.OFF,
     val spectrumCoverColor: Boolean = false,
     val fixedWidth: Boolean = false,

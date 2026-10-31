@@ -23,6 +23,8 @@ $targetDirectory = [System.IO.Path]::GetDirectoryName($target)
 [System.IO.Directory]::CreateDirectory($targetDirectory) | Out-Null
 $arguments = @('/nologo', '/std:c++20', '/EHsc', '/O2', '/MT', '/LD', '/W4', '/permissive-', '/utf-8',
     '/DWIN32_LEAN_AND_MEAN', '/DNOMINMAX', '/D_WIN32_WINNT=0x0A00', '/DWINVER=0x0A00',
+    # DISPLAYCONFIG_SDR_WHITE_LEVEL is gated on NTDDI_WIN10_RS1; _WIN32_WINNT alone leaves it undeclared.
+    '/DNTDDI_VERSION=0x0A000002',
     ('/I' + (Join-Path $runtimeRoot 'include')))
 foreach ($part in @('ucrt', 'shared', 'um', 'winrt', 'cppwinrt')) {
     $arguments += '/I' + (Join-Path $sdk.FullName $part)

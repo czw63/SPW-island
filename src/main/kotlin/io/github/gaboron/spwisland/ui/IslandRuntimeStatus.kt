@@ -77,6 +77,10 @@ internal object IslandRuntimeStatus {
         return buildList {
             add(IslandStatusEntry("背景材质", summary, detail,
                 capturing && glass.warning, IslandStatusGroup.RENDERING))
+            if (capturing && glass.color.isNotEmpty()) add(IslandStatusEntry("桌面色彩", glass.color,
+                if (glass.color.startsWith("HDR")) "HDR 桌面按参考白映射回 SDR 编码后再参与玻璃光学，与周围窗口亮度一致。"
+                else "桌面为 SDR 输出。",
+                group = IslandStatusGroup.RENDERING))
             if (capturing && glass.framesPerSecond != null) add(IslandStatusEntry("桌面捕获",
                 "${glass.framesPerSecond} fps · 原生处理 ${glass.nativeTimeMs} ms",
                 "处理耗时不含界面等待与绘制。玻璃窗口从系统录屏中排除。",

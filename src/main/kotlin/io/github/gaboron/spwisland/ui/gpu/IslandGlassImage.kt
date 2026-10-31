@@ -8,7 +8,10 @@ import org.jetbrains.skia.*
 internal class IslandGlassImage : AutoCloseable {
     private var source: WindowsDesktopBackdrop.Pixels? = null
     private var scale = 0f to 0f
+    /** Raster image this class owns; null when the desktop crop arrived as a borrowed GPU texture. */
     private var image: Image? = null
+    private var toneShader: Shader? = null
+    private var plainShader: Shader? = null
     private var filtered: Shader? = null
     private var filteredTransition: Shader? = null
     private var filteredEdge: Shader? = null
@@ -56,28 +59,64 @@ internal class IslandGlassImage : AutoCloseable {
     private fun upload(sample: WindowsDesktopBackdrop.Sample) {
         val pixels = sample.pixels
         val nextScale = sample.scaleX to sample.scaleY
-        val owned = if (pixels.texture == null) Image.makeRaster(ImageInfo(pixels.width, pixels.height,
-            ColorType.BGRA_8888, ColorAlphaType.OPAQUE), checkNotNull(pixels.data), pixels.width * 4) else null
-        val nextImage = pixels.texture ?: checkNotNull(owned)
+        val owned = if (pixels.texture == null) Image.makeRaster(
+            if (pixels.wide) ImageInfo(pixels.width, pixels.height, ColorType.RGBA_F16, ColorAlphaType.PREMUL)
+            else ImageInfo(pixels.width, pixels.height, ColorType.BGRA_8888, ColorAlphaType.OPAQUE),
+            checkNotNull(pixels.data), pixels.width * if (pixels.wide) 8 else 4) else null
+        val crop = pixels.texture ?: checkNotNull(owned)
+        // HDR crops arrive as scRGB; every downstream program expects encoded sRGB, so the
+        // conversion happens once here instead of at each of the three blur layers.
+        val tone = if (pixels.wide) IslandGlassHdrConversion.shader(crop, paperWhiteScale(sample)) else null
+        if (pixels.wide && tone == null) {
+            // Painting raw scRGB through the sRGB optics would clip every highlight to white, so
+            // refuse the frame instead. The caller then falls back to the classic background
+            // rather than showing a silently wrong material.
+            owned?.close()
+            throw IllegalStateException("HDR 桌面需要 tone map 着色器，当前运行时无法编译")
+        }
+        val plain = if (tone == null)
+            crop.makeShader(FilterTileMode.CLAMP, FilterTileMode.CLAMP, FilterMode.LINEAR) else null
+        val cropShader = tone ?: checkNotNull(plain)
+        fun abandon() {
+            plain?.close(); tone?.close(); owned?.close()
+        }
         val nextShader = try {
-            filter(nextImage, sample, IslandGlassShaders.CENTER_BLUR_SIGMA)
-        } catch (error: Throwable) { owned?.close(); throw error }
+            filter(cropShader, pixels, sample, IslandGlassShaders.CENTER_BLUR_SIGMA)
+        } catch (error: Throwable) { abandon(); throw error }
         val nextTransition = try {
-            filter(nextImage, sample, IslandGlassShaders.TRANSITION_BLUR_SIGMA)
-        } catch (error: Throwable) { nextShader.close(); owned?.close(); throw error }
+            filter(cropShader, pixels, sample, IslandGlassShaders.TRANSITION_BLUR_SIGMA)
+        } catch (error: Throwable) { nextShader.close(); abandon(); throw error }
         val nextEdge = try {
-            filter(nextImage, sample, IslandGlassShaders.EDGE_BLUR_SIGMA)
-        } catch (error: Throwable) { nextTransition.close(); nextShader.close(); owned?.close(); throw error }
-        filtered?.close(); filteredTransition?.close(); filteredEdge?.close(); image?.close()
+            filter(cropShader, pixels, sample, IslandGlassShaders.EDGE_BLUR_SIGMA)
+        } catch (error: Throwable) { nextTransition.close(); nextShader.close(); abandon(); throw error }
+        // The picture shaders retain their own references, but the inputs stay alive until the
+        // next upload so a live picture can never observe a released image.
+        filtered?.close(); filteredTransition?.close(); filteredEdge?.close()
+        toneShader?.close(); plainShader?.close()
+        image?.close()
         filteredTransition = nextTransition
         filtered = nextShader; filteredEdge = nextEdge; image = owned
+        toneShader = tone; plainShader = plain
         source = pixels; scale = nextScale; mappingKey = null
     }
 
-    private fun filter(image: Image, sample: WindowsDesktopBackdrop.Sample, sigma: Float): Shader =
+    /**
+     * How far SDR paper white sits above scRGB's own 1.0 for this capture.
+     *
+     * Returns 1.0 for the 8-bit SDR transport, where values are already encoded sRGB.
+     */
+    private fun paperWhiteScale(sample: WindowsDesktopBackdrop.Sample): Float {
+        val color = sample.color ?: return 1f
+        if (!color.hdr) return 1f
+        return IslandGlassToneMap.paperWhiteScale(IslandGlassToneMap.paperWhite(
+            color.sdrWhiteNits, color.maxLuminance, color.whiteLevelMeasured))
+    }
+
+    private fun filter(cropShader: Shader, pixels: WindowsDesktopBackdrop.Pixels,
+                       sample: WindowsDesktopBackdrop.Sample, sigma: Float): Shader =
         PictureRecorder().use { recorder ->
-            val pixels = sample.pixels
-            val canvas = recorder.beginRecording(Rect.makeWH(pixels.width.toFloat(), pixels.height.toFloat()))
+            val bounds = Rect.makeWH(pixels.width.toFloat(), pixels.height.toFloat())
+            val canvas = recorder.beginRecording(bounds)
             Paint().use { paint ->
                 // Backdrop effects/ColorFilter.kt: saturation 1.5, contrast 1, brightness 0.
                 ColorFilter.makeMatrix(ColorMatrix(
@@ -90,7 +129,8 @@ internal class IslandGlassImage : AutoCloseable {
                         ImageFilter.makeBlur(sigma * sample.scaleX, sigma * sample.scaleY,
                             FilterTileMode.CLAMP, vibrancy).use { blur ->
                             paint.imageFilter = blur
-                            canvas.drawImage(image, 0f, 0f, paint)
+                            paint.shader = cropShader
+                            canvas.drawRect(bounds, paint)
                         }
                     }
                 }
@@ -107,6 +147,8 @@ internal class IslandGlassImage : AutoCloseable {
         filtered?.close(); filtered = null
         filteredTransition?.close(); filteredTransition = null
         filteredEdge?.close(); filteredEdge = null
+        toneShader?.close(); toneShader = null
+        plainShader?.close(); plainShader = null
         image?.close(); image = null; source = null
         builder?.close(); builder = null
         effect?.close(); effect = null; mappingKey = null

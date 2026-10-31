@@ -1,0 +1,78 @@
+name: Build plugin
+
+# The universal .spmod needs MSVC + a Windows SDK (C++/WinRT) and JDK 25, which the
+# hosted Windows runners already provide. Building here also avoids shipping a
+# half-built package from a machine that lacks the native toolchain.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Kotlin and resource changes fail fast here without touching the native toolchain,
+  # so a type or API error is distinguishable from a C++ build problem.
+  kotlin:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Gradle build pins a Java 25 toolchain; the runner's default JAVA_HOME is 17.
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Compile Kotlin only
+        shell: pwsh
+        run: .\gradlew.bat --no-daemon --stacktrace compileKotlin -x processResources
+
+  full:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # build-glass.ps1 locates vswhere and the SDK itself, so only report what is present.
+      - name: Report native toolchain
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path $vswhere)) { throw 'vswhere.exe is missing on this runner' }
+          & $vswhere -latest -products '*' -property installationPath
+          Get-ChildItem (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Include') -Directory |
+            Select-Object -ExpandProperty Name
+          java -version
+
+      - name: Build
+        shell: pwsh
+        run: .\gradlew.bat --no-daemon --stacktrace build plugin
+
+      - name: Upload plugin package
+        uses: actions/upload-artifact@v4
+        with:
+          name: spmod
+          path: build/distributions/*.spmod
+          if-no-files-found: error
+
+      - name: Upload build reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports
+          path: |
+            build/reports/**
+            build/test-results/**
+          if-no-files-found: ignore

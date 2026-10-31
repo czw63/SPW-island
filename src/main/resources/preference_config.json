@@ -218,7 +218,14 @@
             "liquid_glass"
           ],
           "default_value": "classic",
-          "summary": "Windows 需 Windows 11 SDR；Linux 需安装下方支持。低性能模式下不可用。"
+          "summary": "Windows 11（SDR / HDR）需 GPU 绘制；Linux 需安装下方支持。低性能模式下不可用。"
+        },
+        {
+          "type": "switch",
+          "key": "hdr_tone_mapping",
+          "title": "HDR 桌面按参考白映射",
+          "default_value": true,
+          "summary": "Windows：HDR 桌面以 FP16 抓取后映射回 SDR 编码，与周围窗口亮度一致。关闭后 HDR 桌面回退 8bit 抓取，高光会偏白。"
         },
         {
           "type": "button",

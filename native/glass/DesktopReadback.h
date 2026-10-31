@@ -2,6 +2,7 @@
 #pragma once
 #include <windows.h>
 #include <d3d11_4.h>
+#include <dxgi1_6.h>
 #include <winrt/base.h>
 #include <algorithm>
 #include <array>
@@ -9,6 +10,13 @@
 #include <cstring>
 #include <vector>
 #include "DesktopSharedTexture.h"
+
+// Bytes per pixel of the capture transport. HDR desktops composite in FP16 scRGB and cannot be
+// represented by the 8-bit path without overclipping, so both formats travel the same code.
+inline UINT desktopBytesPerPixel(bool wide) { return wide ? 8u : 4u; }
+inline DXGI_FORMAT desktopFormat(bool wide) {
+    return wide ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+}
 
 // Only the capture worker touches the D3D context. Never wait for a just-submitted GPU copy.
 class DesktopReadback {
@@ -19,6 +27,7 @@ class DesktopReadback {
         uint64_t sequence = 0;
         int64_t sourceTime = 0;
         bool pending = false;
+        bool wide = false;
     };
     std::array<Slot, 3> slots;
     uint64_t sequence = 0;
@@ -35,6 +44,7 @@ public:
         RECT crop{};
         int64_t sourceTime = 0;
         std::shared_ptr<DesktopSharedTexture> shared;
+        bool wide = false;
     };
     DesktopReadback(ID3D11Device* device, ID3D11DeviceContext* context) {
         winrt::com_ptr<ID3D11Device5> modern;
@@ -83,23 +93,27 @@ public:
         return completedEvent;
     }
     bool submit(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* source,
-                RECT crop, POINT monitorOrigin, int64_t sourceTime) {
+                RECT crop, POINT monitorOrigin, int64_t sourceTime, bool wide = false) {
         auto free = std::find_if(slots.begin(), slots.end(), [](auto const& slot) { return !slot.pending; });
         if (free == slots.end()) return false; // Skip intermediate work; retry with the newest frame.
+        const auto format = desktopFormat(wide);
         const UINT width = crop.right - crop.left, height = crop.bottom - crop.top;
         const UINT capacityWidth = (width + 63) / 64 * 64, capacityHeight = (height + 63) / 64 * 64;
         D3D11_TEXTURE2D_DESC description{};
         if (free->texture) free->texture->GetDesc(&description);
         if (consumer) {
-            // Never overwrite a texture already handed to Skia. Snapshot copy is asynchronous.
-            free->shared = DesktopSharedTexture::create(device, consumer.get(), width, height);
+            // Never overwrite a texture already handed to Skia. Snapshot copy is asynchronous and
+            // Skia may still hold the resource after this worker drops its own reference, so each
+            // published frame gets a fresh allocation rather than a recycled one.
+            free->shared = DesktopSharedTexture::create(device, consumer.get(), width, height, format);
             free->texture = free->shared->texture;
-        } else if (!free->texture || description.Width != capacityWidth || description.Height != capacityHeight) {
+        } else if (!free->texture || description.Width != capacityWidth || description.Height != capacityHeight ||
+                   description.Format != format) {
             free->texture = nullptr;
             description = {};
             description.Width = capacityWidth; description.Height = capacityHeight;
             description.MipLevels = 1; description.ArraySize = 1;
-            description.Format = DXGI_FORMAT_B8G8R8A8_UNORM; description.SampleDesc.Count = 1;
+            description.Format = format; description.SampleDesc.Count = 1;
             description.Usage = D3D11_USAGE_STAGING; description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
             winrt::check_hresult(device->CreateTexture2D(&description, nullptr, free->texture.put()));
         }
@@ -113,7 +127,7 @@ public:
             lastSignal = sequence;
         }
         context->Flush(); // Submit without a CPU/GPU rendezvous; Map is polled below.
-        free->crop = crop; free->sourceTime = sourceTime; free->pending = true;
+        free->crop = crop; free->sourceTime = sourceTime; free->pending = true; free->wide = wide;
         return true;
     }
     bool takeLatest(ID3D11DeviceContext* context, Frame& result) {
@@ -127,24 +141,25 @@ public:
                     throw winrt::hresult_error(DXGI_ERROR_DEVICE_REMOVED, L"Desktop capture device was removed");
                 if (completed < slot->sequence) continue;
                 result.shared = std::move(slot->shared); result.pixels.clear();
-                result.crop = slot->crop; result.sourceTime = slot->sourceTime;
+                result.crop = slot->crop; result.sourceTime = slot->sourceTime; result.wide = slot->wide;
                 for (auto& previous : slots) if (previous.sequence <= slot->sequence) {
                     previous.pending = false; previous.shared.reset(); previous.texture = nullptr;
                 }
                 return true;
             }
             const size_t width = slot->crop.right - slot->crop.left, height = slot->crop.bottom - slot->crop.top;
-            result.pixels.resize(width * height * 4);
+            const size_t pixelBytes = desktopBytesPerPixel(slot->wide);
+            result.pixels.resize(width * height * pixelBytes);
             D3D11_MAPPED_SUBRESOURCE mapped{};
             const auto status = context->Map(slot->texture.get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
             if (status == DXGI_ERROR_WAS_STILL_DRAWING) continue;
             winrt::check_hresult(status);
             for (size_t row = 0; row < height; ++row)
-                std::memcpy(result.pixels.data() + row * width * 4,
-                    static_cast<uint8_t*>(mapped.pData) + row * mapped.RowPitch, width * 4);
+                std::memcpy(result.pixels.data() + row * width * pixelBytes,
+                    static_cast<uint8_t*>(mapped.pData) + row * mapped.RowPitch, width * pixelBytes);
             context->Unmap(slot->texture.get(), 0);
             result.shared.reset();
-            result.crop = slot->crop; result.sourceTime = slot->sourceTime;
+            result.crop = slot->crop; result.sourceTime = slot->sourceTime; result.wide = slot->wide;
             // Discard older images. Reuse stays ordered by the same immediate context.
             for (auto& previous : slots) if (previous.sequence <= slot->sequence) previous.pending = false;
             return true;
