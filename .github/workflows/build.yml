@@ -60,11 +60,19 @@ jobs:
         shell: pwsh
         run: .\gradlew.bat --no-daemon --stacktrace build plugin
 
+      # The workshop plugin owns the package destination, so report where it landed instead
+      # of assuming the stock build/distributions path.
+      - name: Locate plugin package
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path . -Recurse -Filter *.spmod -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length | Format-Table -AutoSize
+
       - name: Upload plugin package
         uses: actions/upload-artifact@v4
         with:
           name: spmod
-          path: build/distributions/*.spmod
+          path: "**/*.spmod"
           if-no-files-found: error
 
       - name: Upload build reports on failure
