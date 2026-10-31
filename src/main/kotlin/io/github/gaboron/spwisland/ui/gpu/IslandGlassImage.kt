@@ -75,7 +75,7 @@ internal class IslandGlassImage : AutoCloseable {
             throw IllegalStateException("HDR 桌面需要 tone map 着色器，当前运行时无法编译")
         }
         val plain = if (tone == null)
-            crop.makeShader(FilterTileMode.CLAMP, FilterTileMode.CLAMP, FilterMode.LINEAR) else null
+            crop.makeShader(FilterTileMode.CLAMP, FilterTileMode.CLAMP, SamplingMode.LINEAR) else null
         val cropShader = tone ?: checkNotNull(plain)
         fun abandon() {
             plain?.close(); tone?.close(); owned?.close()

@@ -31,8 +31,9 @@ internal object IslandGlassHdrConversion {
             val effect = program ?: RuntimeEffect.makeForShader(PROGRAM).also { program = it }
             val builder = RuntimeShaderBuilder(effect)
             try {
+                // The crop is sampled 1:1, so nearest keeps the tone map from inventing values.
                 builder.child("source", image.makeShader(FilterTileMode.CLAMP, FilterTileMode.CLAMP,
-                    FilterMode.NEAREST))
+                    FilterMipmap(FilterMode.NEAREST, MipmapMode.NONE)))
                 builder.uniform("paperWhiteScale", paperWhiteScale)
                 builder.uniform("ceiling", IslandGlassToneMap.HIGHLIGHT_CEILING)
                 builder.makeShader()
