@@ -58,6 +58,8 @@ Windows 界面运行在 SPW JVM 中，使用 Skia / Direct3D。Linux 界面运�
 
 Windows 的 `WindowsDesktopBackdrop` 对接原生桌面采样，`WindowsGpuTextureImport` 将共享纹理交给 Skia；原生代码位于 `native/glass/`。辅助窗口复用 `LiquidGlassSurface` 和 `SwingGlassMaterial`。
 
+HDR 桌面由 `native/glass/DisplayColor.h` 探测色彩模式和参考白，再由 `HdrToneMap.h` 在交接**之前**把 FP16 的 scRGB 画面渲染成 8 位 sRGB，所以共享纹理、回读和 Skia 包装这条链路对 SDR 与 HDR 是同一份代码。FP16 不能跨越这道交接：`Surface.makeFromBackendRenderTarget` 对它返回 null。设计取舍与数值验证见[液态玻璃与 HDR 桌面](glass-hdr.md)。
+
 GNOME 和 KDE 在合成器内处理后景，`LinuxCompositorGlass` 只传轮廓和不透明度。GPU 后景、客户端 alpha 和动画轮廓分别处理，保留原窗口绘制与输入。候选材质完成首帧后再切换，失联或停用时释放租约。
 
 GNOME 源码位于 `src/linux/resources/native/gnome-glass/`；KWin 源码位于 `native/kwin-glass/`，由 `kwinGlass` 任务随插件分发。KWin 安装器通过宿主 systemd 用户服务构建，校验运行版本、软件包和 SDK 一致性。首次注册固定链接，此后在用户目录构建并切换唯一文件名的模块，避免复用已加载的旧库。
