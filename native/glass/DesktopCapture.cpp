@@ -400,10 +400,20 @@ class Capture {
                             auto source = desktop.get();
                             auto sourceOrigin = POINT{ monitorInfo.rcMonitor.left, monitorInfo.rcMonitor.top };
                             if (sessionColor.mode == DisplayColorMode::HDR) {
-                                source = toneMap.convert(context.get(), desktop.get(), crop, sourceOrigin,
-                                    paperWhiteScale(sessionColor), IslandToneMapCeiling);
-                                if (!source)
-                                    throw hresult_error(E_FAIL, L"The HDR tone map is unavailable");
+                                try {
+                                    source = toneMap.convert(context.get(), desktop.get(), crop, sourceOrigin,
+                                        paperWhiteScale(sessionColor), IslandToneMapCeiling);
+                                } catch (hresult_error const& error) {
+                                    // Losing the tone map must not take the shared transport with
+                                    // it: drop to the SDR path, which needs no conversion at all.
+                                    diagnostics.record("HDR tone map", error.code());
+                                    forceSdr.store(true); signal->notify();
+                                    source = nullptr;
+                                }
+                                if (!source) {
+                                    monitor = nullptr;
+                                    continue;
+                                }
                                 // The mapped texture holds only the crop, so its own origin is the
                                 // crop corner and submit's box lands on the whole texture.
                                 sourceOrigin = POINT{ crop.left, crop.top };

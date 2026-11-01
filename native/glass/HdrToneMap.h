@@ -139,6 +139,11 @@ public:
         catch (winrt::hresult_error const& error) {
             failure = error.code();
             vertex = nullptr; pixel = nullptr; parameters = nullptr;
+        } catch (...) {
+            // Anything else here still only costs HDR, so it must not reach the worker's
+            // top-level handler and tear down the whole capture session.
+            failure = E_FAIL;
+            vertex = nullptr; pixel = nullptr; parameters = nullptr;
         }
     }
 
