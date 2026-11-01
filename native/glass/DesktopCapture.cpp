@@ -231,7 +231,9 @@ class Capture {
             DesktopReadback::Frame completed;
             HdrToneMap toneMap;
             toneMap.initialize(device.get());
-            if (!toneMap.ready()) gpuFallback("HDR tone map shader", toneMap.error());
+            // A shader failure only costs HDR; the 8-bit transport is still intact, so this is
+            // recorded as a diagnostic instead of a GPU-transport fallback.
+            if (!toneMap.ready()) diagnostics.record("HDR tone map shader", toneMap.error());
             int contentWidth = 0, contentHeight = 0;
             RECT previousCrop{};
             uint64_t desktopVersion = 0, submittedVersion = 0;
@@ -396,17 +398,21 @@ class Capture {
                             // crop back to 8-bit sRGB, so the transport below stays uniform and
                             // Skia never has to wrap a wide render target.
                             auto source = desktop.get();
+                            auto sourceOrigin = POINT{ monitorInfo.rcMonitor.left, monitorInfo.rcMonitor.top };
                             if (sessionColor.mode == DisplayColorMode::HDR) {
-                                source = toneMap.convert(context.get(), desktop.get(), crop,
-                                    POINT{ monitorInfo.rcMonitor.left, monitorInfo.rcMonitor.top },
+                                source = toneMap.convert(context.get(), desktop.get(), crop, sourceOrigin,
                                     paperWhiteScale(sessionColor), IslandToneMapCeiling);
-                                if (!source) throw hresult_error(E_FAIL, L"The HDR tone map is unavailable");
+                                if (!source)
+                                    throw hresult_error(E_FAIL, L"The HDR tone map is unavailable");
+                                // The mapped texture holds only the crop, so its own origin is the
+                                // crop corner and submit's box lands on the whole texture.
+                                sourceOrigin = POINT{ crop.left, crop.top };
                             }
-                            if (readback.submit(device.get(), context.get(), source, crop,
-                            POINT{ monitorInfo.rcMonitor.left, monitorInfo.rcMonitor.top },
-                            desktopVersion != submittedVersion ? desktopTime : clock100ns())) {
-                            submittedVersion = desktopVersion; previousCrop = crop;
-                        } } catch (hresult_error const& error) {
+                            const auto stamp = desktopVersion != submittedVersion ? desktopTime : clock100ns();
+                            if (readback.submit(device.get(), context.get(), source, crop, sourceOrigin, stamp)) {
+                                submittedVersion = desktopVersion; previousCrop = crop;
+                            }
+                        } catch (hresult_error const& error) {
                             if (!readback.shared()) throw;
                             const auto operation = "Shared texture: " + to_string(error.message());
                             gpuFallback(operation.c_str(), error.code());
