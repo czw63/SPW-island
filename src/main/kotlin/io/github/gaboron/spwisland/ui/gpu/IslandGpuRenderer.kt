@@ -44,11 +44,7 @@ internal class IslandGpuRenderer(private val owner: Window, private val surface:
         "gpuActive" to active, "compatibilityMode" to failed,
         "layerDisplayable" to layer?.isDisplayable, "layerShowing" to layer?.isShowing,
         "renderer" to rendererInfo,
-        "awtCanvasGraphics" to AwtGraphicsDiagnostics.read(layer?.canvas?.graphicsConfiguration),
-        "desktopColor" to backdrop?.color?.let { color ->
-            mapOf("hdr" to color.hdr, "sdrWhiteNits" to color.sdrWhiteNits,
-                "maxLuminance" to color.maxLuminance, "whiteLevelMeasured" to color.whiteLevelMeasured)
-        }
+        "awtCanvasGraphics" to AwtGraphicsDiagnostics.read(layer?.canvas?.graphicsConfiguration)
     )
     val glassStatus get() = scene?.glassFailure?.let { GlassStatus("使用经典背景", it, warning = true) } ?: when {
         scene?.glassWaitingForCrop == true -> GlassStatus("等待桌面图像", "等待完整的单屏后景，暂用经典背景。")
@@ -156,7 +152,6 @@ internal class IslandGpuRenderer(private val owner: Window, private val surface:
                         } catch (error: Throwable) {
                             IslandLog.failure("IslandGpuRenderer", "caught.error", error); fallback(error) }
                     }.also { backdrop = it }
-                    if (!settings.hdrToneMapping) source.setHdrToneMapping(false)
                     // Capture the visible animated contour, not the much larger reserved backing canvas.
                     // 32 physical pixel tiles keep small layout changes from constantly resizing readback buffers.
                     val bounds = IslandHoverGeometry.frame(surface.island.width, surface.island.height,

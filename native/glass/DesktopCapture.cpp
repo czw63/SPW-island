@@ -25,6 +25,7 @@
 #include "DesktopReadback.h"
 #include "DesktopViewport.h"
 #include "DisplayColor.h"
+#include "HdrToneMap.h"
 #include "CaptureDiagnostics.h"
 
 using namespace winrt;
@@ -102,14 +103,28 @@ com_ptr<IDXGIOutput6> colorOutput(HMONITOR monitor) {
     throw hresult_error(E_FAIL, L"Cannot identify the capture display");
 }
 
-// The desktop backdrop is a blurred, refracted crop behind a large-radius lens. Refreshing it
-// at display cadence is invisible while costing a full-frame copy every vblank, so the
-// transport is throttled to a rate the optics can actually resolve.
+// The backdrop is a blurred, refracted crop behind a large-radius lens. Refreshing it at
+// display cadence is invisible while costing a full-frame copy every vblank, so the transport
+// is throttled to a rate the optics can actually resolve.
 constexpr auto kMinUpdateInterval = std::chrono::milliseconds(33);
-// HDR desktops composite in FP16 scRGB; an 8-bit UNORM crop cannot represent that signal.
-DirectXPixelFormat pixelFormat(DisplayColorInfo const& color) {
+
+// An HDR desktop composites in FP16 scRGB; asking for 8-bit there would clip every highlight
+// before the tone map could roll it off, so the frame pool follows the display.
+DirectXPixelFormat poolFormat(DisplayColorInfo const& color) {
     return color.mode == DisplayColorMode::HDR
         ? DirectXPixelFormat::R16G16B16A16Float : DirectXPixelFormat::B8G8R8A8UIntNormalized;
+}
+
+// scRGB 1.0 is D65 white at 80 nits while Windows renders SDR content at the user's paper
+// white, so dividing by this ratio puts every SDR pixel back at 1.0.
+constexpr float kScRgbReferenceWhiteNits = 80.0f;
+// Headroom above paper white. The optics expect encoded sRGB, and this is how far past 1.0
+// the rolloff is allowed to reach before the final 8-bit composition clips.
+constexpr float IslandToneMapCeiling = 1.25f;
+
+float paperWhiteScale(DisplayColorInfo const& color) {
+    if (!(color.sdrWhiteNits > 0.0f)) return 1.0f;
+    return color.sdrWhiteNits / kScRgbReferenceWhiteNits;
 }
 
 class Capture {
@@ -124,12 +139,11 @@ class Capture {
     std::wstring adapterName;
     int adapterPriority = 0;
     std::atomic<bool> forceCpu = false;
-    // Skia may be unable to wrap an FP16 render target on this driver. Degrading to the 8-bit
-    // transport keeps the glass visible instead of dropping to the CPU readback path.
+    // Skia cannot wrap an FP16 shared render target, so the tone map runs on the capture
+    // device and the transport stays 8-bit. This tracks whether that path is available.
     std::atomic<bool> forceSdr = false;
     RECT publishedRect{};
     RECT publishedDisplay{};
-    bool publishedWide = false;
     DisplayColorInfo color;
     uint64_t serial = 0;
     bool ready = false;
@@ -215,6 +229,9 @@ class Capture {
             }
             DesktopViewport viewport;
             DesktopReadback::Frame completed;
+            HdrToneMap toneMap;
+            toneMap.initialize(device.get());
+            if (!toneMap.ready()) gpuFallback("HDR tone map shader", toneMap.error());
             int contentWidth = 0, contentHeight = 0;
             RECT previousCrop{};
             uint64_t desktopVersion = 0, submittedVersion = 0;
@@ -229,7 +246,7 @@ class Capture {
                 try { if (session) session.Close(); } catch (...) { diagnostics.record("release.Session", winrt::to_hresult()); }
                 try { if (pool) pool.Close(); } catch (...) { diagnostics.record("release.Pool", winrt::to_hresult()); }
                 session = nullptr; pool = nullptr; item = nullptr;
-                desktop = nullptr; readback.reset(); viewport.reset();
+                desktop = nullptr; readback.reset(); viewport.reset(); toneMap.reset();
                 contentWidth = 0; contentHeight = 0;
             };
             try {
@@ -280,7 +297,10 @@ class Capture {
                         monitorInfo = nextInfo;
                         displayColor = colorOutput(monitor);
                         sessionColor = queryDisplayColor(monitor, displayColor.get());
-                        if (forceSdr.load()) sessionColor.mode = DisplayColorMode::SDR;
+                        // Without a compiled tone map the FP16 crop cannot be converted back to
+                        // the 8-bit transport, so the capture stays on the SDR path instead of
+                        // failing every frame.
+                        if (forceSdr.load() || !toneMap.ready()) sessionColor.mode = DisplayColorMode::SDR;
                         { std::lock_guard lock(mutex); color = sessionColor; }
                         nextColorCheck = std::chrono::steady_clock::now() + std::chrono::seconds(1);
                         const auto interop = get_activation_factory<GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
@@ -290,7 +310,7 @@ class Capture {
                             closed->store(true); wake->notify();
                         });
                         pool = Direct3D11CaptureFramePool::CreateFreeThreaded(runtimeDevice,
-                            pixelFormat(sessionColor), 3, item.Size());
+                            poolFormat(sessionColor), 3, item.Size());
                         frameArrived = pool.FrameArrived([wake = signal](auto const&, auto const&) { wake->notify(); });
                         session = pool.CreateCaptureSession(item);
                         session.IsCursorCaptureEnabled(false);
@@ -303,13 +323,12 @@ class Capture {
                     if (std::chrono::steady_clock::now() >= nextColorCheck) {
                         const auto measured = queryDisplayColor(monitor, displayColor.get());
                         nextColorCheck = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-                        const auto mode = forceSdr.load() ? DisplayColorMode::SDR : measured.mode;
+                        const auto mode = forceSdr.load() || !toneMap.ready()
+                            ? DisplayColorMode::SDR : measured.mode;
                         if (mode != sessionColor.mode) {
-                            // The frame pool format is fixed for a session's lifetime, so an HDR
-                            // toggle has to rebuild it rather than reinterpret the pixels.
-                            // Clearing the monitor forces the session-setup branch below to run.
-                            { std::lock_guard lock(mutex); color = measured; color.mode = mode;
-                              ready = false; publishedGpu.reset(); }
+                            // A frame pool's format is fixed for the lifetime of its session, so a
+                            // colour-mode change has to rebuild the session. Clearing the monitor
+                            // sends the next iteration through the session-setup branch above.
                             closeSession();
                             monitor = nullptr;
                             continue;
@@ -347,7 +366,7 @@ class Capture {
                         if (heldFrame) heldFrame.Close();
                         heldFrame = nullptr; readback.reset(); viewport.reset();
                         if (newSize.Width > 0 && newSize.Height > 0)
-                            pool.Recreate(runtimeDevice, pixelFormat(sessionColor), 3, newSize);
+                            pool.Recreate(runtimeDevice, poolFormat(sessionColor), 3, newSize);
                         desktop = nullptr;
                         continue;
                     }
@@ -360,13 +379,11 @@ class Capture {
                     if (readback.takeLatest(context.get(), completed)) {
                         // The worker is the only writer; comparison can run beside the UI's
                         // read-only copy. Hold the publication lock only for the atomic swap.
-                        if (completed.shared || !ready || !EqualRect(&publishedRect, &completed.crop) ||
-                            publishedWide != completed.wide || published != completed.pixels) {
+                        if (completed.shared || !ready || !EqualRect(&publishedRect, &completed.crop) || published != completed.pixels) {
                             std::lock_guard lock(mutex);
                             published.swap(completed.pixels); publishedGpu = std::move(completed.shared);
                             publishedRect = completed.crop;
                             publishedDisplay = available;
-                            publishedWide = completed.wide;
                             ++serial;
                             transportUs = std::max<int64_t>(0, (clock100ns() - completed.sourceTime) / 10);
                             ready = true;
@@ -374,10 +391,20 @@ class Capture {
                         }
                     }
                     if (desktopVersion != submittedVersion || !EqualRect(&crop, &previousCrop)) {
-                        try { if (readback.submit(device.get(), context.get(), desktop.get(), crop,
+                        try {
+                            // The tone map is the only consumer of FP16 pixels: it renders the
+                            // crop back to 8-bit sRGB, so the transport below stays uniform and
+                            // Skia never has to wrap a wide render target.
+                            auto source = desktop.get();
+                            if (sessionColor.mode == DisplayColorMode::HDR) {
+                                source = toneMap.convert(context.get(), desktop.get(), crop,
+                                    POINT{ monitorInfo.rcMonitor.left, monitorInfo.rcMonitor.top },
+                                    paperWhiteScale(sessionColor), IslandToneMapCeiling);
+                                if (!source) throw hresult_error(E_FAIL, L"The HDR tone map is unavailable");
+                            }
+                            if (readback.submit(device.get(), context.get(), source, crop,
                             POINT{ monitorInfo.rcMonitor.left, monitorInfo.rcMonitor.top },
-                            desktopVersion != submittedVersion ? desktopTime : clock100ns(),
-                            sessionColor.mode == DisplayColorMode::HDR)) {
+                            desktopVersion != submittedVersion ? desktopTime : clock100ns())) {
                             submittedVersion = desktopVersion; previousCrop = crop;
                         } } catch (hresult_error const& error) {
                             if (!readback.shared()) throw;
@@ -440,9 +467,7 @@ public:
         metadata[0] = serial; metadata[1] = publishedRect.left; metadata[2] = publishedRect.top;
         metadata[3] = publishedRect.right - publishedRect.left; metadata[4] = publishedRect.bottom - publishedRect.top;
         metadata[5] = origin.x; metadata[6] = origin.y; metadata[7] = transportUs;
-        // Bit 0 marks a GPU lease; bit 1 marks FP16 scRGB pixels. The Kotlin side reads both.
-        metadata[8] = 0;
-        metadata[9] = (publishedGpu ? 1 : 0) | (publishedWide ? 2 : 0);
+        metadata[8] = 0; metadata[9] = publishedGpu ? 1 : 0;
         metadata[10] = publishedDisplay.left; metadata[11] = publishedDisplay.top;
         metadata[12] = publishedDisplay.right; metadata[13] = publishedDisplay.bottom;
     }

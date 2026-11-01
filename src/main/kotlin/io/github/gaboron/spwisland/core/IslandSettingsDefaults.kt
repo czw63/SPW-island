@@ -21,7 +21,6 @@ object IslandSettingsDefaults {
         "lyric_cover_color" to defaults.lyricCoverColor,
         "background_cover_color" to defaults.backgroundCoverColor,
         "background_style" to defaults.backgroundStyle.storageName,
-        "hdr_tone_mapping" to defaults.hdrToneMapping,
         "background_progress" to "off",
         "spectrum_cover_color" to defaults.spectrumCoverColor,
         "fixed_width" to defaults.fixedWidth,

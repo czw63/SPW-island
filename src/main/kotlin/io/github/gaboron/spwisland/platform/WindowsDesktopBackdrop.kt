@@ -15,16 +15,24 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.SwingUtilities
 
-/** Small desktop crops only. WinRT, D3D11 and capture exclusion live on the DLL's worker. */
+/**
+ * Desktop colour of the captured display.
+ *
+ * [hdr] means the desktop composites in FP16 scRGB; the native tone map already converted the
+ * crop back to encoded sRGB, so this is reported for diagnostics and not applied here.
+ */
+internal data class ColorMode(val hdr: Boolean, val sdrWhiteNits: Float, val maxLuminance: Float,
+                              val whiteLevelMeasured: Boolean)
+
+/** Desktop crops. WinRT, D3D11 and capture exclusion live on the DLL's worker. */
 internal class WindowsDesktopBackdrop(private val report: (Throwable) -> Unit,
                                       private val gpu: WindowsGpuTextureImport?,
                                       private val dispatch: (() -> Unit) -> Unit = { SwingUtilities.invokeLater(it) },
                                       private val redraw: () -> Unit) : AutoCloseable {
     data class Pixels(val serial: Long, val data: Data?, val texture: Image?, val x: Int, val y: Int,
                       val width: Int, val height: Int, val displayLeft: Int, val displayTop: Int,
-                      val displayRight: Int, val displayBottom: Int, val wide: Boolean = false)
-    data class Sample(val pixels: Pixels, val islandX: Float, val islandY: Float, val scaleX: Float, val scaleY: Float,
-                      val color: ColorMode? = null) {
+                      val displayRight: Int, val displayBottom: Int)
+    data class Sample(val pixels: Pixels, val islandX: Float, val islandY: Float, val scaleX: Float, val scaleY: Float) {
         /** Optical padding is logical; crop/display bounds and the tolerance are physical pixels. */
         fun covers(left: Float, top: Float, right: Float, bottom: Float, padding: Float): Boolean {
             val x1 = islandX + left * scaleX
@@ -49,6 +57,7 @@ internal class WindowsDesktopBackdrop(private val report: (Throwable) -> Unit,
         fun GlassCreateGpuWithPreference(adapter: WString, priority: Int): Pointer?
         fun GlassUseCpu(capture: Pointer)
         fun GlassUseSdr(capture: Pointer)
+        fun GlassColorInfo(capture: Pointer, info: LongArray)
         fun GlassAcquireGpu(capture: Pointer, metadata: LongArray): Pointer?
         fun GlassReleaseGpu(lease: Pointer)
         fun GlassRequest(capture: Pointer, owner: Pointer, input: Pointer?, x: Int, y: Int, width: Int, height: Int)
@@ -56,7 +65,6 @@ internal class WindowsDesktopBackdrop(private val report: (Throwable) -> Unit,
         fun GlassWait(capture: Pointer, timeout: Int): Int
         fun GlassError(capture: Pointer, message: ByteArray, capacity: Int)
         fun GlassGpuError(capture: Pointer, message: ByteArray, capacity: Int)
-        fun GlassColorInfo(capture: Pointer, info: LongArray)
         fun GlassStop(capture: Pointer)
         fun GlassFinish(capture: Pointer)
         fun GlassDiagnostic(capture: Pointer, message: ByteArray, capacity: Int): Int
@@ -77,13 +85,9 @@ internal class WindowsDesktopBackdrop(private val report: (Throwable) -> Unit,
     private var gpuFallback: String? = null
     private var nativeGpuReasonRead = false
     private val colorInfo = LongArray(5)
-    var status = GlassStatus("等待桌面图像")
-        private set
-
-    /** Desktop composition colour for the captured display, refreshed with every published crop. */
-    data class ColorMode(val hdr: Boolean, val sdrWhiteNits: Float, val maxLuminance: Float,
-                         val whiteLevelMeasured: Boolean)
     var color: ColorMode? = null
+        private set
+    var status = GlassStatus("等待桌面图像")
         private set
 
     fun request(owner: Window, input: Window?, x: Int, y: Int, width: Int, height: Int,
@@ -116,44 +120,37 @@ internal class WindowsDesktopBackdrop(private val report: (Throwable) -> Unit,
         return try {
             // GPU frames borrow an immutable native resource; the fallback writes into Skia Data.
             var result = native.GlassRead(current, image?.serial ?: 0L, null, 0, metadata)
-            // Bit 1 of the transport flags marks FP16 scRGB; it is part of the frame identity.
-            var wide = metadata[9] and 2L != 0L
             if (result == 4) {
                 if (gpuFallback != null) return null
                 val lease = native.GlassAcquireGpu(current, metadata) ?: return null
                 try {
-                    val next = checkNotNull(gpu).image(metadata[8], metadata[3].toInt(), metadata[4].toInt(), wide)
+                    val next = checkNotNull(gpu).image(metadata[8], metadata[3].toInt(), metadata[4].toInt())
                     if (next != null) {
                         val previous = image
                         image = Pixels(metadata[0], null, next, metadata[1].toInt(), metadata[2].toInt(),
                             metadata[3].toInt(), metadata[4].toInt(), metadata[10].toInt(), metadata[11].toInt(),
-                            metadata[12].toInt(), metadata[13].toInt(), wide)
+                            metadata[12].toInt(), metadata[13].toInt())
                         dispose(previous); receivedFrames++
                     }
                 } catch (error: Throwable) {
                     IslandLog.failure("WindowsDesktopBackdrop", "caught.error", error);
                     gpuFallback = error.message ?: error.javaClass.simpleName
-                    // An FP16 render target the driver cannot wrap is not a GPU-transport failure;
-                    // fall back to the 8-bit crop so the glass keeps its GPU path.
-                    if (wide) { native.GlassUseSdr(current); return null }
                     native.GlassUseCpu(current)
                     return null
                 } finally { native.GlassReleaseGpu(lease) }
             }
             for (attempt in 0 until 2) {
                 if (result != 2) break
-                val size = Math.multiplyExact(Math.multiplyExact(metadata[3].toInt(), metadata[4].toInt()),
-                    if (wide) 8 else 4)
+                val size = Math.multiplyExact(Math.multiplyExact(metadata[3].toInt(), metadata[4].toInt()), 4)
                 check(size in 1..64_000_000) { "桌面裁片尺寸无效" }
                 val next = Data.makeUninitialized(size)
                 try {
                     result = native.GlassRead(current, image?.serial ?: 0L, Pointer(next.writableData()), size, metadata)
-                    wide = metadata[9] and 2L != 0L
                     if (result == 1) {
                         val previous = image
                         image = Pixels(metadata[0], next, null, metadata[1].toInt(), metadata[2].toInt(),
                             metadata[3].toInt(), metadata[4].toInt(), metadata[10].toInt(), metadata[11].toInt(),
-                            metadata[12].toInt(), metadata[13].toInt(), wide)
+                            metadata[12].toInt(), metadata[13].toInt())
                         dispose(previous)
                         receivedFrames++
                     }
@@ -182,10 +179,11 @@ internal class WindowsDesktopBackdrop(private val report: (Throwable) -> Unit,
                 }
                 val transport = if (it.texture != null) "GPU 共享纹理" else "CPU 中转"
                 native.GlassColorInfo(current, colorInfo)
-                color = ColorMode(colorInfo[0] != 0L, colorInfo[1] / 1000f, colorInfo[2] / 1000f, colorInfo[4] != 0L)
+                color = ColorMode(colorInfo[0] != 0L, colorInfo[1] / 1000f, colorInfo[2] / 1000f,
+                    colorInfo[4] != 0L)
                 status = GlassStatus(transport, gpuFallback.orEmpty(), gpuFallback != null,
                     updateRate, (metadata[7] + 500) / 1000, describeColor(color))
-                Sample(it, metadata[5] + islandX * scaleX, metadata[6] + islandY * scaleY, scaleX, scaleY, color)
+                Sample(it, metadata[5] + islandX * scaleX, metadata[6] + islandY * scaleY, scaleX, scaleY)
             }
         } catch (error: Throwable) {
             IslandLog.failure("WindowsDesktopBackdrop", "caught.error", error); fail(error); null }
@@ -196,21 +194,12 @@ internal class WindowsDesktopBackdrop(private val report: (Throwable) -> Unit,
         pixels?.texture?.let { checkNotNull(gpu).release(it) }
     }
 
-    /** HDR desktops are captured in FP16 scRGB and mapped back to encoded sRGB before optics. */
+    /** The native tone map already mapped HDR to encoded sRGB, so this only describes it. */
     private fun describeColor(mode: ColorMode?): String = when {
         mode == null -> ""
         !mode.hdr -> "SDR"
         mode.whiteLevelMeasured -> "HDR · 参考白 ${mode.sdrWhiteNits.toInt()} nit"
         else -> "HDR · 参考白 ${mode.sdrWhiteNits.toInt()} nit（估算）"
-    }
-
-    /** False once the caller disables HDR mapping, which reverts to the 8-bit SDR transport. */
-    fun setHdrToneMapping(enabled: Boolean) {
-        if (enabled || unavailable) return
-        val native = api ?: return
-        val current = capture ?: return
-        runCatching { native.GlassUseSdr(current) }
-            .onFailure { IslandLog.failure("WindowsDesktopBackdrop", "hdr.sdr_fallback.failed", it) }
     }
 
     private fun listen(native: Api, current: Pointer) {

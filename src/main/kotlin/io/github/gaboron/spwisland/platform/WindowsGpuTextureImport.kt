@@ -54,19 +54,15 @@ internal class WindowsGpuTextureImport(private val layer: SkiaLayer) {
         return synchronized(lock, block)
     }
 
-    fun image(resource: Long, width: Int, height: Int, wide: Boolean = false): Image? {
+    fun image(resource: Long, width: Int, height: Int): Image? {
         val current = find() ?: error("Skiko Direct3D 导入接口不可用")
         return synchronized(current.lock) {
             // Stock Skiko creates its context on the first playback, after the first recording.
             val context = current.context.get(current.handler) as? DirectContext ?: return@synchronized null
             check(!context.isClosed) { "Skiko Direct3D 上下文已释放" }
-            // 87 = DXGI_FORMAT_B8G8R8A8_UNORM, 10 = DXGI_FORMAT_R16G16B16A16_FLOAT.
-            // HDR desktops composite in FP16 scRGB, which an 8-bit wrap would clip to white.
-            val format = if (wide) 10 else 87
-            val colorFormat = if (wide) SurfaceColorFormat.RGBA_F16 else SurfaceColorFormat.BGRA_8888
-            BackendRenderTarget.makeDirect3D(width, height, resource, format, 1, 1).use { target ->
+            BackendRenderTarget.makeDirect3D(width, height, resource, 87, 1, 1).use { target ->
                 checkNotNull(Surface.makeFromBackendRenderTarget(context, target, SurfaceOrigin.TOP_LEFT,
-                    colorFormat, null)) { "Direct3D 共享纹理无法包装为 Skia 表面" }.use { surface ->
+                    SurfaceColorFormat.BGRA_8888, null)) { "Direct3D 共享纹理无法包装为 Skia 表面" }.use { surface ->
                     // A wrapped non-texture RT snapshot is a GPU copy into a Skia-owned image.
                     // Producer allocations are immutable even after this asynchronous copy is queued.
                     surface.makeImageSnapshot()

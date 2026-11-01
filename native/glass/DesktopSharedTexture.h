@@ -19,12 +19,9 @@ struct DesktopSharedTexture {
     }
 
     static std::shared_ptr<DesktopSharedTexture> create(
-        ID3D11Device* device, ID3D12Device* consumer, UINT width, UINT height,
-        DXGI_FORMAT format = DXGI_FORMAT_B8G8R8A8_UNORM) {
+        ID3D11Device* device, ID3D12Device* consumer, UINT width, UINT height) {
         if (!device || !consumer || !width || !height)
             throw winrt::hresult_error(E_INVALIDARG, L"Invalid shared desktop texture parameters");
-        if (format != DXGI_FORMAT_B8G8R8A8_UNORM && format != DXGI_FORMAT_R16G16B16A16_FLOAT)
-            throw winrt::hresult_error(E_INVALIDARG, L"Unsupported shared desktop texture format");
 
         auto result = std::make_shared<DesktopSharedTexture>();
         D3D11_TEXTURE2D_DESC description{};
@@ -32,7 +29,7 @@ struct DesktopSharedTexture {
         description.Height = height;
         description.MipLevels = 1;
         description.ArraySize = 1;
-        description.Format = format;
+        description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         description.SampleDesc.Count = 1;
         description.Usage = D3D11_USAGE_DEFAULT;
         description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;

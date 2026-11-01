@@ -29,8 +29,7 @@ public:
             std::min(display.right, ceilTile(required.right + 128)),
             std::min(display.bottom, ceilTile(required.bottom + 64)) };
         const auto width = next.right - next.left, height = next.bottom - next.top;
-        // 8 bytes per pixel: the HDR transport is FP16 scRGB, so the budget is not format-specific.
-        if (width > 16384 || height > 16384 || static_cast<uint64_t>(width) * height * 8 > 64'000'000)
+        if (width > 16384 || height > 16384 || static_cast<uint64_t>(width) * height * 4 > 64'000'000)
             next = required;
         cached = next;
         return cached;

@@ -35,6 +35,6 @@ $arguments += @((Join-Path $PSScriptRoot '..\native\glass\DesktopCapture.cpp'),
     ('/LIBPATH:' + (Join-Path $compilerRoot.FullName 'lib\onecore\x64')),
     ('/LIBPATH:' + (Join-Path $sdkRoot ('Lib\' + $sdk.Name + '\um\x64'))),
     ('/LIBPATH:' + (Join-Path $sdkRoot ('Lib\' + $sdk.Name + '\ucrt\x64'))),
-    'windowsapp.lib', 'd3d11.lib', 'd3d12.lib', 'dxgi.lib', 'user32.lib')
+    'windowsapp.lib', 'd3d11.lib', 'd3d12.lib', 'dxgi.lib', 'd3dcompiler.lib', 'user32.lib')
 & (Join-Path $compilerRoot.FullName 'bin\Hostx64\x64\cl.exe') @arguments
 if ($LASTEXITCODE -ne 0) { throw "Desktop capture build failed: $LASTEXITCODE" }

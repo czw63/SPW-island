@@ -24,7 +24,7 @@
 | 本地专辑封面 | ✅ | ✅ |
 | 歌词 / 背景封面取色 | ✅ | ✅ |
 | 背景播放进度 | ✅ | ✅ |
-| 实验性液态玻璃背景 | ✅*（Windows 11 SDR / HDR） | GNOME 50 / Arch KDE Wayland* |
+| 实验性液态玻璃背景 | ✅*（Windows 11 SDR） | GNOME 50 / Arch KDE Wayland* |
 | 悬停展开播放控制 | ✅ | ✅ |
 | 可用时拖动进度条 | ✅ | ✅ |
 | 九宫格拖动与吸附 | ✅ | ✅ |
@@ -41,9 +41,7 @@
 
 ## 液态玻璃
 
-- **Windows**：Windows 11 和 GPU 绘制；作用于词岛、右键菜单和关于页。部分录屏工具可能无法录到玻璃窗口。
-  - HDR 桌面以 FP16 抓取后按 Windows 的 SDR 参考白映射回 SDR 编码，因此玻璃亮度与周围 SDR 窗口一致，不会更亮。关闭“HDR 桌面按参考白映射”会回退 8bit 抓取，亮壁纸下高光会偏白。
-  - 桌面捕获按 30 fps 节流：玻璃背景是多层模糊与折射，更高帧率不可见；歌词高亮仍按显示刷新率绘制。
+- **Windows**：Windows 11 SDR 和 GPU 绘制；作用于词岛、右键菜单和关于页。部分录屏工具可能无法录到玻璃窗口。
 - **GNOME Shell 50**：仅词岛主体，需[安装配套支持](installation.md#linux)。
 - **KDE Plasma**：Arch Linux、KWin 6.6–6.8 Wayland 和 OpenGL 合成；仅词岛主体，需[安装配套支持](installation.md#linux)。
 
