@@ -56,7 +56,6 @@ internal class WindowsDesktopBackdrop(private val report: (Throwable) -> Unit,
         fun GlassCreationError(): Int
         fun GlassCreateGpuWithPreference(adapter: WString, priority: Int): Pointer?
         fun GlassUseCpu(capture: Pointer)
-        fun GlassUseSdr(capture: Pointer)
         fun GlassColorInfo(capture: Pointer, info: LongArray)
         fun GlassAcquireGpu(capture: Pointer, metadata: LongArray): Pointer?
         fun GlassReleaseGpu(lease: Pointer)

@@ -477,7 +477,6 @@ public:
         signal->notify();
     }
     void useCpu() { forceCpu.store(true); signal->notify(); }
-    void useSdr() { forceSdr.store(true); signal->notify(); }
     void describe(int64_t* metadata) {
         const auto origin = clientOrigin(requested.owner);
         metadata[0] = serial; metadata[1] = publishedRect.left; metadata[2] = publishedRect.top;
@@ -545,7 +544,6 @@ __declspec(dllexport) void* GlassCreateGpuWithPreference(wchar_t const* adapter,
 }
 __declspec(dllexport) HRESULT GlassCreationError() noexcept { return creationFailure; }
 __declspec(dllexport) void GlassUseCpu(void* capture) noexcept { static_cast<Capture*>(capture)->useCpu(); }
-__declspec(dllexport) void GlassUseSdr(void* capture) noexcept { static_cast<Capture*>(capture)->useSdr(); }
 __declspec(dllexport) void* GlassAcquireGpu(void* capture, int64_t* metadata) noexcept {
     try { return static_cast<Capture*>(capture)->acquireGpu(metadata); }
     catch (...) { static_cast<Capture*>(capture)->record("acquireGpu", winrt::to_hresult()); return nullptr; }
